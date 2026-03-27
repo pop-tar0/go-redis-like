@@ -105,7 +105,60 @@ redis-cli -p 6380
 
 ---
 
+## AOF Rewrite（啟動時壓縮）
+
+### 問題
+
+AOF 只 append，不清除，`SET name taro` 執行 100 次就有 100 筆，只有最後一筆有效，檔案無限增長。
+
+此外，`SET k v EX 60` 儲存的是原始指令，若跑了 30 秒後重啟，replay 會再執行一次 `SET k v EX 60`，TTL 從 60 重算而不是剩下的 30 秒。
+
+### 解法：啟動時重寫（方案 B）
+
+replay 完成後，立即把 store 的當前狀態重寫成一份乾淨的 AOF：
+
+```
+replay → store 恢復 → Rewrite() → 乾淨的 AOF → 啟動 server
+```
+
+### 實作
+
+**`store.Snapshot()`** — 匯出所有未過期的資料：
+
+```go
+type SnapshotEntry struct {
+    Key    string
+    Value  string
+    Expiry time.Time  // 零值表示永久
+}
+
+func (s *Store) Snapshot() []SnapshotEntry
+```
+
+**`aof.Rewrite(store, path)`** — 重寫 AOF：
+
+1. 寫入暫存檔 `redis.aof.tmp`
+2. 有 TTL 的 key 用**剩餘秒數**寫成 `SET k v EX N`（解決 TTL 重置問題）
+3. `os.Rename` 原子替換原始檔案
+4. 重新開啟檔案供後續 append
+
+**`main.go`** 啟動流程：
+
+```
+aof.New() → aof.Replay() → aof.Rewrite() → server.New() → server.Run()
+```
+
+### `.gitignore`
+
+`redis.aof` 是執行時產生的資料檔，不應進版本控制，已加入 `.gitignore`：
+
+```
+*.aof
+```
+
+---
+
 ## 目前限制
 
-- AOF 檔案只會無限增長，不會自動壓縮（BGREWRITEAOF 留待後續）
-- **TTL 重啟後會重置**：AOF 儲存的是原始指令，例如 `SET k v EX 60`。若跑了 30 秒後重啟，replay 會再執行一次 `SET k v EX 60`，TTL 從 60 重新計算，而不是剩下的 30 秒。真正的 Redis 解法是儲存**絕對過期時間戳**，而非相對秒數。
+- 重寫是在啟動時同步執行，資料量大時會增加啟動時間
+- 未來可升級為背景 goroutine 執行的 BGREWRITEAOF（方案 C）

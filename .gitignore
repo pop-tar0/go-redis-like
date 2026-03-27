@@ -1,0 +1,5 @@
+# AOF 持久化資料檔
+*.aof
+
+# Go 編譯產物
+go-redis-like

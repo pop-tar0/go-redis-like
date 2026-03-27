@@ -68,6 +68,14 @@ func main() {
 	}
 	fmt.Println("✅ AOF 恢復完成")
 
+	// replay 完成後重寫 AOF，清除冗餘指令
+	fmt.Println("🔄 正在壓縮 AOF...")
+	if err := a.Rewrite(s, "redis.aof"); err != nil {
+		fmt.Fprintln(os.Stderr, "❌ AOF rewrite 失敗:", err)
+		os.Exit(1)
+	}
+	fmt.Println("✅ AOF 壓縮完成")
+
 	// 啟動伺服器
 	srv := server.New(":6380", s, a)
 

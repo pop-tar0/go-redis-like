@@ -169,3 +169,36 @@ func (s *Store) activeExpiry() {
 		s.mu.Unlock()
 	}
 }
+
+// SnapshotEntry 代表一筆快照資料。
+type SnapshotEntry struct {
+	Key    string
+	Value  string
+	Expiry time.Time // 零值表示永久
+}
+
+/**
+ * Snapshot 回傳目前所有未過期的 key-value 資料（含過期時間），供 AOF rewrite 使用。
+ */
+func (s *Store) Snapshot() []SnapshotEntry {
+	// 使用讀鎖來保護對 data map 的讀操作，確保在多線程環境下不會發生競爭條件。
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now()
+	entries := make([]SnapshotEntry, 0, len(s.data))
+	// 遍歷 data map 中的所有 key-value 對，檢查每個 key 是否已經過期，如果過期則跳過，否則將 key、value 和過期時間（如果有）封裝成 SnapshotEntry，加入 entries 切片中，最後回傳這個切片。
+	for key, val := range s.data {
+		exp, hasExp := s.expiry[key]
+		if hasExp && now.After(exp) {
+			continue // 跳過已過期的
+		}
+
+		// 將 key、value 和過期時間（如果有）封裝成 SnapshotEntry，加入 entries 切片中，最後回傳這個切片。
+		entries = append(entries, SnapshotEntry{
+			Key:    key,
+			Value:  val,
+			Expiry: exp,
+		})
+	}
+	return entries
+}

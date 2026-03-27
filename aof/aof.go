@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"go-redis-like/resp"
+	"go-redis-like/store"
 )
 
 // AOF 負責將指令持久化到檔案，並在啟動時重播。
@@ -98,4 +100,63 @@ func (a *AOF) Close() error {
 		return err
 	}
 	return a.file.Close()
+}
+
+// Rewrite 將 store 目前的快照重寫成乾淨的 AOF 檔案，清除冗餘指令。
+// 流程：先寫入暫存檔 → 替換原始檔案，確保原子性。
+func (a *AOF) Rewrite(s *store.Store, path string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	tmpPath := path + ".tmp"
+	tmp, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("aof: create tmp: %w", err)
+	}
+
+	w := bufio.NewWriter(tmp)
+	entries := s.Snapshot()
+	for _, e := range entries {
+		if !e.Expiry.IsZero() {
+			// 有 TTL：計算剩餘秒數，寫成 SET key value EX secs
+			remaining := int64(time.Until(e.Expiry).Seconds())
+			if remaining <= 0 {
+				continue // 已過期，跳過
+			}
+			secs := fmt.Sprintf("%d", remaining)
+			args := []string{"SET", e.Key, e.Value, "EX", secs}
+			fmt.Fprintf(w, "*%d\r\n", len(args))
+			for _, arg := range args {
+				fmt.Fprintf(w, "$%d\r\n%s\r\n", len(arg), arg)
+			}
+		} else {
+			// 永久 key：寫成 SET key value
+			args := []string{"SET", e.Key, e.Value}
+			fmt.Fprintf(w, "*%d\r\n", len(args))
+			for _, arg := range args {
+				fmt.Fprintf(w, "$%d\r\n%s\r\n", len(arg), arg)
+			}
+		}
+	}
+	if err := w.Flush(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	tmp.Close()
+
+	// 原子替換：把暫存檔改名為正式檔案
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("aof: rename: %w", err)
+	}
+
+	// 重新開啟檔案，讓後續的 Write 繼續 append
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("aof: reopen: %w", err)
+	}
+	a.file = f
+	a.writer = bufio.NewWriter(f)
+	return nil
 }
