@@ -8,7 +8,7 @@
 | ------- | --------------------------- | --------- |
 | Stage 1 | TCP Server + Inline 指令    | ✅ 已完成 |
 | Stage 2 | RESP2 協議 + 模組化         | ✅ 已完成 |
-| Stage 3 | TTL / 過期機制              | 🔲 待實作 |
+| Stage 3 | TTL / 過期機制              | ✅ 已完成 |
 | Stage 4 | 持久化（AOF）               | 🔲 待實作 |
 | Stage 5 | 更多資料型態（List / Hash） | 🔲 待實作 |
 | Stage 6 | 單元測試與整合測試          | 🔲 待實作 |
@@ -73,11 +73,7 @@
 
 **完成標準：** `SET k v EX 5` 後等 5 秒，`GET k` 回傳 `$-1`。
 
-📄 詳見 `docs/stage3.md`（待建立）
-
----
-
-## Stage 4｜持久化（AOF）
+📄 詳見 `docs/stage3.md`｜持久化（AOF）
 
 **目標：** 讓資料在 server 重啟後仍能恢復。
 

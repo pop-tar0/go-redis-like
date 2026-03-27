@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
+	"time"
 
 	"go-redis-like/resp"
 	"go-redis-like/store"
@@ -84,7 +86,16 @@ func (srv *Server) handleConn(conn net.Conn) {
 				resp.WriteError(conn, "錯誤的參數數量，SET 命令需要 key 和 value")
 				continue
 			}
-			srv.store.Set(args[1], args[2])
+			var ttl time.Duration
+			if len(args) >= 5 && strings.ToUpper(args[3]) == "EX" {
+				secs, err := strconv.ParseInt(args[4], 10, 64)
+				if err != nil || secs <= 0 {
+					resp.WriteError(conn, "invalid expire time in 'SET'")
+					continue
+				}
+				ttl = time.Duration(secs) * time.Second
+			}
+			srv.store.Set(args[1], args[2], ttl)
 			resp.WriteSimpleString(conn, "OK")
 
 		case "GET":
@@ -128,8 +139,42 @@ func (srv *Server) handleConn(conn net.Conn) {
 			}
 			resp.WriteInteger(conn, count)
 
+		case "EXPIRE":
+			if len(args) < 3 {
+				resp.WriteError(conn, "wrong number of arguments for 'EXPIRE'")
+				continue
+			}
+			secs, err := strconv.ParseInt(args[2], 10, 64)
+			if err != nil || secs <= 0 {
+				resp.WriteError(conn, "value is not an integer or out of range")
+				continue
+			}
+			if srv.store.Expire(args[1], time.Duration(secs)*time.Second) {
+				resp.WriteInteger(conn, 1)
+			} else {
+				resp.WriteInteger(conn, 0)
+			}
+
+		case "TTL":
+			if len(args) < 2 {
+				resp.WriteError(conn, "wrong number of arguments for 'TTL'")
+				continue
+			}
+			resp.WriteInteger(conn, srv.store.TTL(args[1]))
+
+		case "PERSIST":
+			if len(args) < 2 {
+				resp.WriteError(conn, "wrong number of arguments for 'PERSIST'")
+				continue
+			}
+			if srv.store.Persist(args[1]) {
+				resp.WriteInteger(conn, 1)
+			} else {
+				resp.WriteInteger(conn, 0)
+			}
+
 		default:
-			resp.WriteError(conn, fmt.Sprintf("未知的命令 '%s'", strings.ToLower(cmd)))
+			resp.WriteError(conn, fmt.Sprintf("未知的命令 '%s'", strings.ToUpper(cmd)))
 		}
 	}
 }
