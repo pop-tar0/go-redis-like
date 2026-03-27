@@ -2,22 +2,15 @@
 
 ## 文件目的
 
-這份文件描述專案在「階段三」完成的所有變更，包含 TTL / 過期機制的實作。
+記錄 Stage 3 的實作內容：TTL / 過期機制。以目前 `store/store.go` 與 `server/server.go` 的程式碼為準。
 
-## 階段三目標
-
-在階段二的基礎上，讓 key 可以設定存活時間，時間到自動消失：
-
-- `SET key value EX seconds` 支援
-- `EXPIRE key seconds`：設定既有 key 的過期時間
-- `TTL key`：查詢剩餘秒數
-- `PERSIST key`：移除過期時間
-- Lazy expiration：讀取時順便檢查是否過期
-- Active expiration：背景 goroutine 每秒主動清除
+---
 
 ## 與 Stage 2 的差異
 
-### 1. `Store` 新增 expiry map
+### 1. `Store` struct 新增 `expiry` 欄位
+
+Stage 2 的 `Store` 只有 `data`，Stage 3 加上 `expiry` 來記錄每個 key 的過期時間：
 
 ```go
 type Store struct {
@@ -27,102 +20,125 @@ type Store struct {
 }
 ```
 
-### 2. 兩種過期清除策略
+沒有設定過期時間的 key 不會出現在 `expiry` 中。
+
+### 2. `Set` 加入 `ttl` 參數
+
+```go
+// Stage 2
+func (s *Store) Set(key, value string)
+
+// Stage 3
+func (s *Store) Set(key, value string, ttl time.Duration)
+```
+
+- `ttl > 0`：寫入 expiry，設定過期時間
+- `ttl == 0`：視為永久，並**清除**舊的 TTL（避免 SET 後還帶著之前的過期時間）
+
+### 3. 兩種過期策略並用
 
 **Lazy expiration（惰性刪除）**
 
-每次 `Get` 或 `Exists` 時，先檢查 key 是否過期，若過期直接回傳不存在：
+每次 `Get` / `Exists` 時先呼叫 `isExpired()`，過期就當不存在：
 
 ```go
 func (s *Store) Get(key string) (string, bool) {
-    // 過期 → 當作不存在
-    if s.isExpired(key) {
+    s.mu.RLock()
+    defer s.mu.RUnlock()
+    if s.isExpired(key) {   // 過期 → 當作不存在
         return "", false
     }
     ...
 }
 ```
 
-優點：實作簡單，不用主動掃描。  
-缺點：已過期但沒人讀的 key 會一直佔記憶體。
+優點：實作簡單。缺點：沒人讀的過期 key 不會被釋放。
 
 **Active expiration（主動刪除）**
 
-`New()` 啟動一個背景 goroutine，每秒掃描 `expiry` map，刪掉過期的 key：
+`New()` 啟動背景 goroutine，每秒掃描 `expiry` map 並刪除過期 key：
 
 ```go
 func (s *Store) activeExpiry() {
     ticker := time.NewTicker(time.Second)
     for range ticker.C {
-        // 掃描並刪除過期 key
+        s.mu.Lock()
+        now := time.Now()
+        for key, exp := range s.expiry {
+            if now.After(exp) {
+                delete(s.data, key)
+                delete(s.expiry, key)
+            }
+        }
+        s.mu.Unlock()
     }
 }
 ```
 
-優點：記憶體能被主動釋放。  
-兩者並用是 Redis 的真實策略。
+兩種策略並用是 Redis 的真實做法：lazy 保證讀取正確，active 負責釋放記憶體。
 
-### 3. `Set` 加入 TTL 參數
+### 4. `Del` 補上清理 `expiry`
+
+Stage 2 的 `Del` 只刪 `data`，Stage 3 同時刪 `expiry`，避免殘留：
 
 ```go
-func (s *Store) Set(key, value string, ttl time.Duration)
+delete(s.data, key)
+delete(s.expiry, key)  // 新增
 ```
 
-`ttl > 0` 時設定過期時間，`ttl == 0` 視為永久（並清除舊的 TTL）。
+### 5. 新增方法與指令
 
-### 4. 新增方法
+| Store 方法 | 對應指令 | 說明 |
+|---|---|---|
+| `Expire(key, ttl)` | `EXPIRE key seconds` | 設定既有 key 的過期時間，key 不存在回傳 false |
+| `TTL(key) int64` | `TTL key` | 回傳剩餘秒數，`-1` 永久，`-2` 不存在或已過期 |
+| `Persist(key)` | `PERSIST key` | 移除過期時間使其永久，沒有 TTL 則回傳 false |
 
-| 方法               | 說明                                          |
-| ------------------ | --------------------------------------------- |
-| `Expire(key, ttl)` | 設定既有 key 的過期時間，key 不存在回傳 false |
-| `TTL(key)`         | 回傳剩餘秒數，`-1` 永久，`-2` 不存在或已過期  |
-| `Persist(key)`     | 移除過期時間，使 key 永久存在                 |
+---
 
-### 5. `Del` 同時清理 expiry
-
-Stage 2 的 `Del` 只刪 `data`，Stage 3 補上 `delete(s.expiry, key)`，避免殘留資料。
-
-## 階段三支援指令
+## 支援指令
 
 ### `SET key value EX seconds`
 
 ```
-SET session abc EX 10
-→ OK
+> SET session abc EX 10
+OK
 ```
 
 ### `EXPIRE key seconds`
 
 ```
-EXPIRE session 30
-→ (integer) 1   # 成功
-→ (integer) 0   # key 不存在
+> EXPIRE session 30
+(integer) 1    # key 存在，成功設定
+(integer) 0    # key 不存在
 ```
 
 ### `TTL key`
 
 ```
-TTL session
-→ (integer) 28   # 剩餘秒數
-→ (integer) -1   # 永久（沒有 TTL）
-→ (integer) -2   # key 不存在或已過期
+> TTL session
+(integer) 28   # 剩餘秒數
+(integer) -1   # 永久（沒有 TTL）
+(integer) -2   # key 不存在或已過期
 ```
 
 ### `PERSIST key`
 
 ```
-PERSIST session
-→ (integer) 1   # 成功移除 TTL
-→ (integer) 0   # key 沒有 TTL 或不存在
+> PERSIST session
+(integer) 1    # 成功移除 TTL
+(integer) 0    # key 沒有 TTL 或不存在
 ```
+
+---
 
 ## 測試方式
 
 ```bash
-# 啟動 server
 go run main.go
+```
 
-# 開另一個 terminal
+```bash
 redis-cli -p 6380
 ```
 

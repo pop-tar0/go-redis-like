@@ -140,15 +140,18 @@ func (srv *Server) handleConn(conn net.Conn) {
 			resp.WriteInteger(conn, count)
 
 		case "EXPIRE":
+			// EXPIRE 命令需要至少兩個參數：key 和秒數，如果參數不足則回應錯誤。它會嘗試設定指定 key 的過期時間，並回應是否成功設定（即 key 是否存在）。
 			if len(args) < 3 {
 				resp.WriteError(conn, "wrong number of arguments for 'EXPIRE'")
 				continue
 			}
+			// 將第三個參數解析為整數秒數，如果解析失敗或秒數不合法則回應錯誤。
 			secs, err := strconv.ParseInt(args[2], 10, 64)
 			if err != nil || secs <= 0 {
 				resp.WriteError(conn, "value is not an integer or out of range")
 				continue
 			}
+			// 嘗試設定 key 的過期時間，如果成功則回應 1，否則回應 0。
 			if srv.store.Expire(args[1], time.Duration(secs)*time.Second) {
 				resp.WriteInteger(conn, 1)
 			} else {
@@ -156,6 +159,7 @@ func (srv *Server) handleConn(conn net.Conn) {
 			}
 
 		case "TTL":
+			// TTL 命令需要至少一個參數：key，如果參數不足則回應錯誤。
 			if len(args) < 2 {
 				resp.WriteError(conn, "wrong number of arguments for 'TTL'")
 				continue
@@ -163,10 +167,12 @@ func (srv *Server) handleConn(conn net.Conn) {
 			resp.WriteInteger(conn, srv.store.TTL(args[1]))
 
 		case "PERSIST":
+			// PERSIST 命令需要至少一個參數：key，如果參數不足則回應錯誤。
 			if len(args) < 2 {
 				resp.WriteError(conn, "wrong number of arguments for 'PERSIST'")
 				continue
 			}
+			// 嘗試移除 key 的過期時間，如果成功則回應 1，否則回應 0。
 			if srv.store.Persist(args[1]) {
 				resp.WriteInteger(conn, 1)
 			} else {
