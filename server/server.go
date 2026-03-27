@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"go-redis-like/aof"
 	"go-redis-like/resp"
 	"go-redis-like/store"
 )
@@ -19,14 +20,17 @@ type Server struct {
 
 	// store 是一個指向 Store 實例的指標，用於處理資料的存取和管理。
 	store *store.Store
+
+	// aof 負責將寫入指令持久化到磁碟。
+	aof *aof.AOF
 }
 
 /**
  * New 函式用於創建一個新的 Server 實例，接受一個地址字串和一個 Store 實例作為參數。它返回一個 Server 實例。
  * 這個函式主要是用來初始化 Server 結構體，將傳入的地址和 Store 實例賦值給 Server 的字段。
  */
-func New(addr string, s *store.Store) *Server {
-	return &Server{addr: addr, store: s}
+func New(addr string, s *store.Store, a *aof.AOF) *Server {
+	return &Server{addr: addr, store: s, aof: a}
 }
 
 /**
@@ -93,6 +97,8 @@ func (srv *Server) handleConn(conn net.Conn) {
 				continue
 			}
 			var ttl time.Duration
+
+			// 如果 SET 命令有額外的參數，且第三個參數是 "EX"，則解析第四個參數作為過期時間（秒），並將其轉換為 time.Duration。
 			if len(args) >= 5 && strings.ToUpper(args[3]) == "EX" {
 				secs, err := strconv.ParseInt(args[4], 10, 64)
 				if err != nil || secs <= 0 {
@@ -102,6 +108,14 @@ func (srv *Server) handleConn(conn net.Conn) {
 				ttl = time.Duration(secs) * time.Second
 			}
 			srv.store.Set(args[1], args[2], ttl)
+
+			// 將 SET 命令和相關參數寫入 AOF 檔案，這樣在伺服器重啟後可以重放這些指令來恢復資料狀態。
+			srv.aof.Write(args[:3+func() int {
+				if ttl > 0 {
+					return 2
+				}
+				return 0
+			}()])
 			resp.WriteSimpleString(conn, "OK")
 
 		case "GET":
@@ -128,6 +142,9 @@ func (srv *Server) handleConn(conn net.Conn) {
 				if srv.store.Del(key) {
 					deleted++
 				}
+			}
+			if deleted > 0 {
+				srv.aof.Write(args)
 			}
 			resp.WriteInteger(conn, deleted)
 
@@ -159,6 +176,7 @@ func (srv *Server) handleConn(conn net.Conn) {
 			}
 			// 嘗試設定 key 的過期時間，如果成功則回應 1，否則回應 0。
 			if srv.store.Expire(args[1], time.Duration(secs)*time.Second) {
+				srv.aof.Write(args)
 				resp.WriteInteger(conn, 1)
 			} else {
 				resp.WriteInteger(conn, 0)
@@ -180,6 +198,7 @@ func (srv *Server) handleConn(conn net.Conn) {
 			}
 			// 嘗試移除 key 的過期時間，如果成功則回應 1，否則回應 0。
 			if srv.store.Persist(args[1]) {
+				srv.aof.Write(args)
 				resp.WriteInteger(conn, 1)
 			} else {
 				resp.WriteInteger(conn, 0)
