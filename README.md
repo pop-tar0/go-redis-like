@@ -1,181 +1,102 @@
 # Handcrafted Redis Go
 
-這是一個使用 Go 從零開始實作的簡化版 Redis-like TCP Key-Value Server，目標是透過實作理解 Redis 最核心的幾個概念：
+使用 Go 從零開始實作的簡化版 Redis-like TCP Key-Value Server，透過實作理解 Redis 最核心的幾個概念。
 
-- TCP 連線與 client handling
-- goroutine 併發模型
-- 記憶體中的 key-value 儲存
-- `sync.RWMutex` 的讀寫鎖保護
-- 類 Redis 指令回應格式
+## 執行方式
 
-目前專案聚焦在學習用途，因此實作刻意保持簡單、清楚，方便閱讀與延伸。
+```bash
+go run main.go
+```
 
-## 專案現況
-
-目前伺服器會監聽本機 `6380` port，支援最基本的：
-
-- `PING`
-- `SET key value`
-- `GET key`
-
-資料儲存在記憶體中，程式結束後不會保留。
-
-## 核心特色
-
-- 使用 Go 原生 `net` 套件建立 TCP server
-- 每個 client connection 以 goroutine 獨立處理
-- 透過 `map[string]string` 當作簡易資料庫
-- 使用 `sync.RWMutex` 避免多連線同時讀寫造成 race condition
-- 使用 `bufio.Scanner` 逐行讀取指令，適合用 `nc` / `telnet` 測試
+```bash
+redis-cli -p 6380
+```
 
 ## 專案結構
 
 ```text
 .
 ├── main.go
-├── README.md
 ├── go.mod
+├── resp/
+│   └── resp.go      ← RESP2 解析器與序列化
 ├── server/
-│   └── server.go
-└── store/
-    └── store.go
-```
-
-目前主要邏輯集中在 `main.go`，`server/` 與 `store/` 目錄可作為後續模組化重構的延伸位置。
-
-## 執行方式
-
-確認已安裝 Go，然後在專案根目錄執行：
-
-```bash
-go run main.go
-```
-
-成功啟動後，終端機會看到類似：
-
-```text
-✅ 伺服器啟動成功，正在監聽 6380 端口...
-```
-
-## 連線測試
-
-你可以用 `nc` 連進伺服器：
-
-```bash
-nc localhost 6380
-```
-
-接著輸入以下指令：
-
-```text
-PING
-SET user:1 taro
-GET user:1
-GET not_found
-```
-
-預期回應：
-
-```text
-+PONG
-+OK
-$10
-taro
-$-1
-```
-
-也可以直接用 pipe 測試：
-
-```bash
-printf "PING\r\nSET name redis\r\nGET name\r\n" | nc localhost 6380
+│   └── server.go    ← TCP server + 指令路由
+├── store/
+│   └── store.go     ← thread-safe KV store
+└── docs/
+    ├── roadmap.md
+    ├── stage1.md
+    ├── stage2.md
+    └── stage3.md
 ```
 
 ## 支援指令
 
-| 指令   | 說明         | 範例               | 回應          |
-| :----- | :----------- | :----------------- | :------------ |
-| `PING` | 測試連線狀態 | `PING`             | `+PONG`       |
-| `SET`  | 儲存鍵值對   | `SET user:1 alice` | `+OK`         |
-| `GET`  | 取得指定鍵值 | `GET user:1`       | `$5\r\nalice` |
+| 指令                       | 說明               | 範例                  |
+| -------------------------- | ------------------ | --------------------- |
+| `PING`                     | 測試連線           | `PING`                |
+| `SET key value`            | 寫入               | `SET name taro`       |
+| `SET key value EX seconds` | 寫入並設定 TTL     | `SET name taro EX 10` |
+| `GET key`                  | 讀取               | `GET name`            |
+| `DEL key [key ...]`        | 刪除，回傳刪除數量 | `DEL name`            |
+| `EXISTS key [key ...]`     | 查存在數量         | `EXISTS name`         |
+| `EXPIRE key seconds`       | 設定過期時間       | `EXPIRE name 30`      |
+| `TTL key`                  | 查剩餘秒數         | `TTL name`            |
+| `PERSIST key`              | 移除過期時間       | `PERSIST name`        |
 
-## 實作重點
+## Roadmap
 
-### 1. TCP 監聽
+| Stage   | 主題                        | 狀態      |
+| ------- | --------------------------- | --------- |
+| Stage 1 | TCP Server + Inline 指令    | ✅ 已完成 |
+| Stage 2 | RESP2 協議 + 模組化         | ✅ 已完成 |
+| Stage 3 | TTL / 過期機制              | ✅ 已完成 |
+| Stage 4 | 持久化（AOF）               | 🔲 待實作 |
+| Stage 5 | 更多資料型態（List / Hash） | 🔲 待實作 |
+| Stage 6 | 單元測試與整合測試          | 🔲 待實作 |
 
-伺服器使用：
+### Stage 1｜TCP Server + Inline 指令
 
-```go
-net.Listen("tcp", ":6380")
-```
+- `net.Listen` 建立 TCP listener
+- goroutine 處理每個 client 連線
+- `sync.RWMutex` 保護共享 map
+- 支援 `PING`、`SET`、`GET`
 
-來建立 TCP listener，持續接受新的 client 連線。
+📄 詳見 `docs/stage1.md`
 
-### 2. 併發處理
+### Stage 2｜RESP2 協議 + 模組化
 
-每當有新連線建立時，會啟動一個 goroutine：
+- `resp` package：解析 RESP2 Array 格式、支援 inline fallback
+- `store` / `server` package 拆分
+- 錯誤回應改為標準 `-ERR` 格式
+- 新增 `DEL`、`EXISTS`
 
-```go
-go handleConnection(conn)
-```
+📄 詳見 `docs/stage2.md`
 
-這讓伺服器可以同時處理多個 client。
+### Stage 3｜TTL / 過期機制
 
-### 3. 記憶體資料儲存
+- `store` 新增 `expiry map[string]time.Time`
+- `SET key value EX seconds` 語法
+- `EXPIRE`、`TTL`、`PERSIST` 指令
+- Lazy expiration + Active expiration 雙策略
 
-資料使用以下結構保存：
+📄 詳見 `docs/stage3.md`
 
-```go
-var (
-    db = make(map[string]string)
-    dbLock sync.RWMutex
-)
-```
+### Stage 4｜持久化（AOF）
 
-- `SET` 時加寫鎖
-- `GET` 時加讀鎖
+- Append-Only File：每次寫入指令 append 到 `.aof`
+- 啟動時 replay AOF 恢復資料
+- `BGREWRITEAOF` 壓縮 AOF
 
-這是目前這個版本最重要的 thread-safety 保護機制。
+### Stage 5｜更多資料型態（List / Hash）
 
-### 4. 指令解析
+- `LPUSH`、`RPUSH`、`LPOP`、`RPOP`、`LRANGE`
+- `HSET`、`HGET`、`HDEL`、`HGETALL`
+- store 升級為 `map[string]interface{}`
 
-目前採用簡單的 inline command 格式，也就是每行一個指令，例如：
+### Stage 6｜單元測試與整合測試
 
-```text
-SET mykey hello
-GET mykey
-```
-
-這和 Redis 正式使用的 RESP 協議不同，但很適合作為第一步練習。
-
-## 目前限制
-
-- 只支援單行文字指令，不支援完整 RESP protocol
-- `SET` 的 value 目前不能包含空白
-- 沒有資料持久化
-- 沒有過期時間（TTL）
-- 沒有刪除、列表、交易等進階功能
-- 錯誤訊息格式尚未完全比照 Redis
-
-## 後續可擴充方向
-
-- 支援 RESP protocol
-- 加入 `DEL`、`EXISTS`、`INCR` 等指令
-- 實作 TTL / expiration
-- 將 server 與 store 邏輯拆分成獨立 package
-- 補上單元測試與整合測試
-- 支援資料持久化（RDB / AOF 概念練習）
-
-## 學習目標
-
-這個專案很適合拿來練習：
-
-- Go 網路程式設計
-- goroutine 與 mutex 的使用時機
-- in-memory database 的基本設計
-- Redis server 的核心概念
-
-如果你想把它繼續往真正可擴充的 mini Redis 發展，下一步很適合先做：
-
-1. 模組化 `server` / `store`
-2. 補上測試
-3. 導入 RESP protocol
+- `resp` / `store` / `server` 各模組 unit test
+- `net.Pipe()` 模擬 TCP 整合測試
+- `go test ./... -race` 全部通過
