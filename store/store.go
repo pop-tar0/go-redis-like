@@ -12,8 +12,10 @@ import (
 type Store struct {
 	// mu 是一個讀寫鎖，用於保護對 data map 的訪問，確保線程安全。
 	mu sync.RWMutex
+
 	// data 是一個 map，用於存儲 key-value 對，其中 key 和 value 都是字符串。
 	data map[string]string
+
 	// expiry 紀錄每個 key 的過期時間，沒有設定過期時間的 key 不會出現在此 map 中。
 	expiry map[string]time.Time
 }

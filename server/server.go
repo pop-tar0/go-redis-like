@@ -14,11 +14,17 @@ import (
 
 // Server 封裝 TCP 監聽與連線管理邏輯。
 type Server struct {
-	addr  string
+	// addr 是伺服器監聽的地址和端口，例如 ":6380"。
+	addr string
+
+	// store 是一個指向 Store 實例的指標，用於處理資料的存取和管理。
 	store *store.Store
 }
 
-// New 建立一個新的 Server，addr 例如 ":6380"。
+/**
+ * New 函式用於創建一個新的 Server 實例，接受一個地址字串和一個 Store 實例作為參數。它返回一個 Server 實例。
+ * 這個函式主要是用來初始化 Server 結構體，將傳入的地址和 Store 實例賦值給 Server 的字段。
+ */
 func New(addr string, s *store.Store) *Server {
 	return &Server{addr: addr, store: s}
 }
